@@ -479,8 +479,29 @@
     //   - username: Tên đăng nhập cần điền
     //   - password: Mật khẩu cần điền
     //
-    window.fillCredentials = function (username, password) {
-        console.log("Filling credentials for: " + username);
+    // =========================================================================
+    // SECURITY TOKEN - Prevent XSS attacks
+    // =========================================================================
+    //
+    // Token được generate và verify bởi Vala backend
+    // Malicious scripts không thể guess được token này
+    //
+    var _securityToken = null;
+
+    // Setter được gọi từ Vala trước khi fill credentials
+    window._setAutofillToken = function (token) {
+        _securityToken = token;
+    };
+
+    // Private function - không expose trực tiếp lên window
+    function fillCredentials(username, password, token) {
+        // Verify token để ngăn XSS
+        if (token !== _securityToken || _securityToken === null) {
+            console.warn("[Security] Invalid autofill token, ignoring request");
+            return;
+        }
+        // Clear token after use (one-time use)
+        _securityToken = null;
 
         var inputs = document.getElementsByTagName('input');
         var filled = false;
@@ -523,7 +544,17 @@
             }
         }
 
-        if (!filled) console.log("No password field found to fill");
+        if (!filled) console.warn("[Autofill] No password field found");
+    }
+
+    // =========================================================================
+    // SECURE FILL - Public interface with token verification  
+    // =========================================================================
+    //
+    // Được gọi từ Vala với token để verify request hợp lệ
+    //
+    window.fillCredentialsSecure = function (username, password, token) {
+        fillCredentials(username, password, token);
     };
 
     // Khởi tạo focus detection
@@ -548,7 +579,7 @@
     //   - username: Username cần hiển thị trong popup
     //
     window.showCredentialPopup = function (username) {
-        console.log("Showing credential popup for: " + username);
+        // Removed sensitive logging for security
 
         // Xóa popup cũ nếu có
         hideCredentialPopup();
@@ -634,7 +665,7 @@
             e.preventDefault();
             e.stopPropagation();
 
-            console.log("Credential selected: " + username);
+            // Removed sensitive logging for security
 
             // Gửi yêu cầu fill_credential đến Vala
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.password_manager) {

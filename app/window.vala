@@ -176,6 +176,17 @@ public class BrowserWindow : Adw.ApplicationWindow {
             //
             cookie_manager.set_persistent_storage(cookie_file, CookiePersistentStorage.SQLITE);
             
+            // -----------------------------------------------------------------
+            // SECURITY: Block third-party cookies (tracking protection)
+            // -----------------------------------------------------------------
+            //
+            // CookieAcceptPolicy.NO_THIRD_PARTY:
+            //   - Chỉ accept cookies từ domain chính
+            //   - Block cookies từ third-party domains (tracking, ads)
+            //
+            cookie_manager.set_accept_policy(CookieAcceptPolicy.NO_THIRD_PARTY);
+            message("Cookie policy: NO_THIRD_PARTY (blocking tracking cookies)");
+            
             message("Cookie file: %s", cookie_file);
         }
         return shared_network_session;
@@ -729,17 +740,36 @@ public class BrowserWindow : Adw.ApplicationWindow {
                         if (cred != null && cred.username == username) {
                             var web_view = self.get_current_web_view();
                             if (web_view != null) {
-                                // Escape ký tự đặc biệt trong password
-                                // Để tránh break JavaScript syntax
-                                //   \ → \\
-                                //   ' → \'
-                                string escaped_password = cred.password.replace("\\", "\\\\").replace("'", "\\'");
+                                // -------------------------------------------------
+                                // SECURITY: Use JSON encoding instead of manual escaping
+                                // -------------------------------------------------
+                                //
+                                // Manual escaping is incomplete and error-prone
+                                // JSON.to_string() handles all special characters properly
+                                //
+                                var builder = new Json.Builder();
+                                builder.begin_object();
+                                builder.set_member_name("u");
+                                builder.add_string_value(cred.username);
+                                builder.set_member_name("p");
+                                builder.add_string_value(cred.password);
+                                builder.end_object();
                                 
-                                // Gọi JavaScript function để điền credentials
-                                string js = "window.fillCredentials('%s', '%s');".printf(cred.username, escaped_password);
-                                web_view.evaluate_javascript.begin(js, -1, null, null, null, null);
+                                var generator = new Json.Generator();
+                                generator.set_root(builder.get_root());
+                                string json_data = generator.to_data(null);
                                 
-                                message("Credentials filled for %s", username);
+                                // Generate one-time security token
+                                string token = "%lld_%d".printf(GLib.get_real_time(), GLib.Random.int_range(1000, 9999));
+                                
+                                // Set token first, then call fill with token verification
+                                string set_token_js = "window._setAutofillToken('%s');".printf(token);
+                                string fill_js = "(function() { var d = %s; window.fillCredentialsSecure(d.u, d.p, '%s'); })();".printf(json_data, token);
+                                
+                                // Execute both in sequence
+                                web_view.evaluate_javascript.begin(set_token_js + fill_js, -1, null, null, null, null);
+                                
+                                message("Credentials filled securely for %s", username);
                             }
                         }
                     }
