@@ -32,7 +32,7 @@ sources = files(
 )
 
 # ------------------------------------------------------------------------------
-# TẠO EXECUTABLE
+# TẠO EXECUTABLE VỚI SECURITY HARDENING FLAGS
 # ------------------------------------------------------------------------------
 #
 # executable(): Định nghĩa cách build một executable
@@ -42,13 +42,34 @@ sources = files(
 #   - sources: Danh sách source files
 #   - dependencies: Thư viện cần link (từ root meson.build)
 #   - install: true = install vào system khi chạy 'ninja install'
+#   - c_args: Compiler flags cho C code
+#   - link_args: Linker flags
 #
-# Kết quả: build/app/my-browser
+# SECURITY FLAGS:
+#   -fstack-protector-strong: Stack canary protection
+#   -D_FORTIFY_SOURCE=2: Buffer overflow detection
+#   -Wformat -Werror=format-security: Format string protection
+#   -Wl,-z,relro: Relocation Read-Only
+#   -Wl,-z,now: Full RELRO (immediate binding)
+#   -pie: Position Independent Executable
+#
+# Kết quả: build/app/my-browser (hardened binary)
 #
 executable('my-browser',
   sources,
   dependencies: deps,
   install: true,
+  c_args: [
+    '-fstack-protector-strong',  # Stack canaries against buffer overflows
+    '-D_FORTIFY_SOURCE=2',       # Runtime buffer overflow checks
+    '-Wformat',                   # Check printf/scanf format strings
+    '-Werror=format-security',    # Treat format security warnings as errors
+  ],
+  link_args: [
+    '-Wl,-z,relro',              # Mark relocation sections read-only
+    '-Wl,-z,now',                # Resolve all symbols at program startup (full RELRO)
+    '-pie',                       # Position independent executable for ASLR
+  ],
 )
 
 # ------------------------------------------------------------------------------

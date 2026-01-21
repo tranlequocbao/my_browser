@@ -91,6 +91,12 @@ public class BrowserWindow : Adw.ApplicationWindow {
     private Button forward_button;   // Nút đi tiếp
     private Button reload_button;    // Nút reload trang
     
+    // URL Autocomplete
+    // ListStore: Lưu trữ gợi ý URL từ lịch sử
+    // Cột 0: URL (string) - giá trị thực tế
+    // Cột 1: Display text (string) - hiển thị cho user (title + url)
+    private Gtk.ListStore url_completion_model;
+    
     // =========================================================================
     // NETWORK SESSION - Quản lý kết nối mạng và dữ liệu persistent
     // =========================================================================
@@ -156,6 +162,16 @@ public class BrowserWindow : Adw.ApplicationWindow {
             // Truyền data_dir và cache_dir để dữ liệu được lưu vĩnh viễn
             //
             shared_network_session = new NetworkSession(data_dir, cache_dir);
+            
+            // -----------------------------------------------------------------
+            // NOTE: Process Sandboxing
+            // -----------------------------------------------------------------
+            //
+            // WebKitGTK 6.0's NetworkSession API doesn't expose process model configuration
+            // Process isolation is handled internally by WebKitGTK
+            // Each WebView automatically uses separate processes for rendering
+            //
+            message("WebKitGTK handles process isolation automatically");
             
             // -----------------------------------------------------------------
             // CẤU HÌNH COOKIE MANAGER
@@ -262,7 +278,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
         header_bar.pack_start(nav_box);
 
         // -----------------------------------------------------------------
-        // TẠO Ô NHẬP URL
+        // TẠO Ô NHẬP URL VỚI AUTOCOMPLETE
         // -----------------------------------------------------------------
         //
         // Entry: Widget nhập text một dòng
@@ -270,6 +286,68 @@ public class BrowserWindow : Adw.ApplicationWindow {
         url_entry = new Entry();
         url_entry.placeholder_text = "Enter URL...";  // Text placeholder
         url_entry.hexpand = true;                      // Mở rộng theo chiều ngang
+        
+        // -----------------------------------------------------------------
+        // THIẾT LẬP AUTOCOMPLETE CHO URL ENTRY
+        // -----------------------------------------------------------------
+        //
+        // EntryCompletion: Widget hiển thị gợi ý dropdown khi user gõ
+        // ListStore: Model lưu trữ các gợi ý
+        //
+        // Cấu trúc ListStore:
+        //   - Cột 0 (string): URL thực tế (https://google.com)
+        //   - Cột 1 (string): Text hiển thị (Google - https://google.com)
+        //
+        url_completion_model = new Gtk.ListStore(2, typeof(string), typeof(string));
+        
+        // Tạo EntryCompletion và gắn model
+        var completion = new Gtk.EntryCompletion();
+        completion.set_model(url_completion_model);
+        
+        // Cấu hình widget hiển thị
+        // text_column = 1: Hiển thị cột 1 (display text) trong dropdown
+        completion.set_text_column(1);
+        
+        // Cấu hình hành vi
+        completion.set_inline_completion(false);     // Không tự động điền inline
+        completion.set_popup_completion(true);       // Hiển thị popup dropdown
+        completion.set_popup_single_match(false);    // Không popup nếu chỉ có 1 match
+        completion.set_minimum_key_length(2);        // Chỉ hiển thị khi gõ >= 2 ký tự
+        
+        // Gắn completion vào url_entry
+        url_entry.set_completion(completion);
+        
+        // -----------------------------------------------------------------
+        // XỬ LÝ KHI USER CHỌN GỢI Ý
+        // -----------------------------------------------------------------
+        //
+        // Signal match-selected: Khi user click hoặc nhấn Enter trên gợi ý
+        //
+        completion.match_selected.connect((model, iter) => {
+            // Lấy URL từ cột 0 của model
+            GLib.Value url_value;
+            model.get_value(iter, 0, out url_value);
+            string selected_url = url_value.get_string();
+            
+            // Điền URL vào entry
+            url_entry.text = selected_url;
+            
+            // Trigger activate signal để load URL
+            url_entry.activate();
+            
+            // Return true để ngăn hành vi mặc định
+            return true;
+        });
+        
+        // -----------------------------------------------------------------
+        // CẬP NHẬT GỢI Ý KHI USER GÕ
+        // -----------------------------------------------------------------
+        //
+        // Signal changed: Khi text trong entry thay đổi
+        //
+        url_entry.changed.connect(() => {
+            update_url_completions();
+        });
         
         // Đặt url_entry làm title widget của header bar
         // → URL entry nằm ở giữa, mở rộng chiếm không gian còn lại
@@ -423,6 +501,42 @@ public class BrowserWindow : Adw.ApplicationWindow {
         web_view.load_changed.connect(on_load_changed);
         
         // -----------------------------------------------------------------
+        // SECURITY: TLS Error Handling
+        // -----------------------------------------------------------------
+        //
+        // load_failed_with_tls_errors: Khi gặp lỗi TLS/SSL
+        // strict_tls: Reject tất cả các lỗi chứng chỉ để bảo mật
+        //
+        web_view.load_failed_with_tls_errors.connect((failing_uri, certificate, errors) => {
+            critical("[Security] TLS Error for %s: %u", failing_uri, errors);
+            
+            // Hiển thị warning dialog
+            var dialog = new Adw.MessageDialog(
+                this,
+                "Security Warning",
+                "The security certificate for %s is not trusted. This site may not be secure.".printf(failing_uri)
+            );
+            dialog.add_response("cancel", "Go Back");
+            dialog.add_response("continue", "Continue Anyway");
+            dialog.set_response_appearance("continue", Adw.ResponseAppearance.DESTRUCTIVE);
+            
+            dialog.response.connect((response) => {
+                if (response == "continue") {
+                    // User chọn tiếp tục bất chấp rủi ro
+                    message("User chose to continue despite TLS error");
+                } else {
+                    // Quay lại trang trước
+                    web_view.go_back();
+                }
+            });
+            
+            dialog.present();
+            
+            // Return true để stop loading (cho phép user quyết định)
+            return true;
+        });
+        
+        // -----------------------------------------------------------------
         // THÊM WEBVIEW VÀO TABVIEW
         // -----------------------------------------------------------------
         //
@@ -451,14 +565,31 @@ public class BrowserWindow : Adw.ApplicationWindow {
         }
 
         // -----------------------------------------------------------------
-        // ENABLE DEVELOPER EXTRAS
+        // SECURITY: Configure WebView Settings
         // -----------------------------------------------------------------
         //
-        // Cho phép mở DevTools (Inspect Element, Console, Network...)
-        // Hữu ích cho debugging
+        // DEVELOPER EXTRAS:
+        //   - Chỉ enable trong DEBUG builds
+        //   - Production: Tắt để ngăn user inspect/modify page content
+        //
+        // FILE ACCESS RESTRICTIONS:
+        //   - Ngăn file:// URLs truy cập file khác
+        //   - Ngăn universal access từ file URLs
         //
         var settings = web_view.get_settings();
+        
+        #if DEBUG
         settings.enable_developer_extras = true;
+        message("Developer extras enabled (DEBUG build)");
+        #else
+        settings.enable_developer_extras = false;
+        message("Developer extras disabled (RELEASE build)");
+        #endif
+        
+        // Block dangerous file access
+        settings.allow_file_access_from_file_urls = false;
+        settings.allow_universal_access_from_file_urls = false;
+        message("File access restrictions enabled");
         
         // -----------------------------------------------------------------
         // INJECT CONSOLE LOGGING SCRIPT
@@ -608,10 +739,12 @@ public class BrowserWindow : Adw.ApplicationWindow {
     }
     
     // =========================================================================
-    // CALLBACK: XỬ LÝ TIN NHẮN TỪ PASSWORD MANAGER (JAVASCRIPT)
+    // CALLBACK: XỪL LÝ TIN NHẮN TỪ PASSWORD MANAGER (JAVASCRIPT)
     // =========================================================================
     //
     // Đây là hàm quan trọng nhất - cầu nối giữa JavaScript và Vala
+    //
+    // SECURITY: Enhanced validation to prevent malicious message injection
     //
     private static void on_password_message(UserContentManager manager, JSC.Value result, BrowserWindow self) {
         message("Password manager message received!");
@@ -620,6 +753,15 @@ public class BrowserWindow : Adw.ApplicationWindow {
             if (result.is_string()) {
                 // Chuyển JSC.Value thành Vala string
                 string msg = result.to_string();
+                
+                // -----------------------------------------------------------------
+                // SECURITY: Validate message length
+                // -----------------------------------------------------------------
+                if (msg.length > 10000) {
+                    warning("Message too large (%zu bytes), rejecting", msg.length);
+                    return;
+                }
+                
                 message("Received message: %s", msg);
                 
                 // -----------------------------------------------------------------
@@ -632,145 +774,199 @@ public class BrowserWindow : Adw.ApplicationWindow {
                 parser.load_from_data(msg);
                 var root = parser.get_root().get_object();
                 
-                // Kiểm tra có field "action" không
-                if (root.has_member("action")) {
-                    var action = root.get_string_member("action");
-                    message("Action: %s", action);
-                    
-                    // ---------------------------------------------------------
-                    // ACTION 1: SAVE_PASSWORD
-                    // ---------------------------------------------------------
-                    //
-                    // Khi JavaScript phát hiện user vừa đăng nhập
-                    // và gửi yêu cầu lưu mật khẩu
-                    //
-                    if (action == "save_password") {
-                        // Lấy thông tin từ JSON
-                        string username = root.get_string_member("username");
-                        string password = root.get_string_member("password");
-                        string url = root.get_string_member("url");
-                        
-                        // Chuẩn hóa URL thành origin
-                        // https://facebook.com/login?ref=abc → https://facebook.com
-                        string origin = self.get_origin(url);
-                        
-                        // Kiểm tra credential đã tồn tại chưa
-                        if (CredentialManager.get_default().has_credential(origin, username)) {
-                            message("Credential already exists for %s, skipping save dialog", username);
-                            return;  // Không cần lưu lại
-                        }
-                        
-                        message("Save password request - User: %s, URL: %s", username, url);
-                        
-                        // -------------------------------------------------
-                        // HIỂN THỊ DIALOG "LƯU MẬT KHẨU?"
-                        // -------------------------------------------------
-                        //
-                        // Adw.MessageDialog: Dialog với message và các buttons
-                        //
-                        var dlg = new Adw.MessageDialog(
-                            self,                                    // Parent window
-                            "Save Password?",                         // Heading
-                            "Do you want to save the password for %s?".printf(username)  // Body
-                        );
-                        
-                        // Thêm các responses (buttons)
-                        dlg.add_response("no", "No");
-                        dlg.add_response("yes", "Yes");
-                        
-                        // Xử lý khi user chọn
-                        dlg.response.connect((response) => {
-                            if (response == "yes") {
-                                // Lưu credential vào Keyring
-                                CredentialManager.get_default().save_credential(origin, username, password);
-                            }
-                        });
-                        
-                        dlg.present();
+                // -----------------------------------------------------------------
+                // SECURITY: Validate JSON schema
+                // -----------------------------------------------------------------
+                if (!root.has_member("action")) {
+                    warning("Missing 'action' field in message");
+                    return;
+                }
+                
+                var action = root.get_string_member("action");
+                
+                // -----------------------------------------------------------------
+                // SECURITY: Action whitelist
+                // -----------------------------------------------------------------
+                if (action != "save_password" && action != "request_credentials" && action != "fill_credential") {
+                    warning("Invalid action: %s", action);
+                    return;
+                }
+                
+                message("Action: %s", action);
+                
+                // ---------------------------------------------------------
+                // ACTION 1: SAVE_PASSWORD
+                // ---------------------------------------------------------
+                //
+                // Khi JavaScript phát hiện user vừa đăng nhập
+                // và gửi yêu cầu lưu mật khẩu
+                //
+                if (action == "save_password") {
+                    // Validate required fields
+                    if (!root.has_member("username") || 
+                        !root.has_member("password") || 
+                        !root.has_member("url")) {
+                        warning("save_password: Missing required fields");
+                        return;
                     }
                     
-                    // ---------------------------------------------------------
-                    // ACTION 2: REQUEST_CREDENTIALS
-                    // ---------------------------------------------------------
+                    // Lấy thông tin từ JSON
+                    string username = root.get_string_member("username");
+                    string password = root.get_string_member("password");
+                    string url = root.get_string_member("url");
+                    
+                    // SECURITY: Validate field lengths
+                    if (username.length > 255 || password.length > 1024 || url.length > 2048) {
+                        warning("save_password: Field length validation failed");
+                        return;
+                    }
+                    
+                    // Chuẩn hóa URL thành origin
+                    // https://facebook.com/login?ref=abc → https://facebook.com
+                    string origin = self.get_origin(url);
+                    
+                    // Kiểm tra credential đã tồn tại chưa
+                    if (CredentialManager.get_default().has_credential(origin, username)) {
+                        message("Credential already exists for %s, skipping save dialog", username);
+                        return;  // Không cần lưu lại
+                    }
+                    
+                    message("Save password request - User: %s, URL: %s", username, url);
+                    
+                    // -------------------------------------------------
+                    // HIỂN THỊ DIALOG "LƯU MẬT KHẨU?"
+                    // -------------------------------------------------
                     //
-                    // Khi user focus vào ô username/password
-                    // JavaScript yêu cầu credentials đã lưu
+                    // Adw.MessageDialog: Dialog với message và các buttons
                     //
-                    else if (action == "request_credentials") {
-                        string url = root.get_string_member("url");
-                        string origin = self.get_origin(url);
+                    var dlg = new Adw.MessageDialog(
+                        self,                                    // Parent window
+                        "Save Password?",                         // Heading
+                        "Do you want to save the password for %s?".printf(username)  // Body
+                    );
+                    
+                    // Thêm các responses (buttons)
+                    dlg.add_response("no", "No");
+                    dlg.add_response("yes", "Yes");
+                    
+                    // Xử lý khi user chọn
+                    dlg.response.connect((response) => {
+                        if (response == "yes") {
+                            // Lưu credential vào Keyring
+                            CredentialManager.get_default().save_credential(origin, username, password);
+                        }
+                    });
+                    
+                    dlg.present();
+                }
+                
+                // ---------------------------------------------------------
+                // ACTION 2: REQUEST_CREDENTIALS
+                // ---------------------------------------------------------
+                //
+                // Khi user focus vào ô username/password
+                // JavaScript yêu cầu credentials đã lưu
+                //
+                else if (action == "request_credentials") {
+                    // Validate required fields
+                    if (!root.has_member("url")) {
+                        warning("request_credentials: Missing url field");
+                        return;
+                    }
+                    
+                    string url = root.get_string_member("url");
+                    
+                    // SECURITY: Validate URL length
+                    if (url.length > 2048) {
+                        warning("request_credentials: URL too long");
+                        return;
+                    }
+                    
+                    string origin = self.get_origin(url);
+                    
+                    message("Request credentials for: %s", origin);
+                    
+                    // Tìm credential trong Keyring
+                    var cred = CredentialManager.get_default().get_credential_sync(origin);
+                    
+                    if (cred != null) {
+                        message("Found credential for %s", cred.username);
                         
-                        message("Request credentials for: %s", origin);
-                        
-                        // Tìm credential trong Keyring
-                        var cred = CredentialManager.get_default().get_credential_sync(origin);
-                        
-                        if (cred != null) {
-                            message("Found credential for %s", cred.username);
+                        var web_view = self.get_current_web_view();
+                        if (web_view != null) {
+                            // Gọi JavaScript function để hiện popup
+                            // evaluate_javascript.begin(): Gọi async (không chờ kết quả)
+                            string js = "if(window.showCredentialPopup) window.showCredentialPopup('%s');".printf(cred.username);
+                            web_view.evaluate_javascript.begin(js, -1, null, null, null, null);
+                        }
+                    } else {
+                        message("No credentials found for %s", origin);
+                    }
+                }
+                
+                // ---------------------------------------------------------
+                // ACTION 3: FILL_CREDENTIAL
+                // ---------------------------------------------------------
+                //
+                // Khi user chọn credential từ popup
+                // JavaScript yêu cầu điền username/password
+                //
+                else if (action == "fill_credential") {
+                    // Validate required fields
+                    if (!root.has_member("url") || !root.has_member("username")) {
+                        warning("fill_credential: Missing required fields");
+                        return;
+                    }
+                    
+                    string url = root.get_string_member("url");
+                    string username = root.get_string_member("username");
+                    
+                    // SECURITY: Validate field lengths
+                    if (url.length > 2048 || username.length > 255) {
+                        warning("fill_credential: Field length validation failed");
+                        return;
+                    }
+                    
+                    string origin = self.get_origin(url);
+                    
+                    message("Fill credential request for: %s", username);
+                    
+                    // Lấy credential từ Keyring
+                    var cred = CredentialManager.get_default().get_credential_sync(origin);
+                    
+                    if (cred != null && cred.username == username) {
+                        var web_view = self.get_current_web_view();
+                        if (web_view != null) {
+                            // -------------------------------------------------
+                            // SECURITY: Use JSON encoding instead of manual escaping
+                            // -------------------------------------------------
+                            //
+                            // Manual escaping is incomplete and error-prone
+                            // JSON.to_string() handles all special characters properly
+                            //
+                            var builder = new Json.Builder();
+                            builder.begin_object();
+                            builder.set_member_name("u");
+                            builder.add_string_value(cred.username);
+                            builder.set_member_name("p");
+                            builder.add_string_value(cred.password);
+                            builder.end_object();
                             
-                            var web_view = self.get_current_web_view();
-                            if (web_view != null) {
-                                // Gọi JavaScript function để hiện popup
-                                // evaluate_javascript.begin(): Gọi async (không chờ kết quả)
-                                string js = "if(window.showCredentialPopup) window.showCredentialPopup('%s');".printf(cred.username);
-                                web_view.evaluate_javascript.begin(js, -1, null, null, null, null);
-                            }
-                        } else {
-                            message("No credentials found for %s", origin);
-                        }
-                    }
-                    
-                    // ---------------------------------------------------------
-                    // ACTION 3: FILL_CREDENTIAL
-                    // ---------------------------------------------------------
-                    //
-                    // Khi user chọn credential từ popup
-                    // JavaScript yêu cầu điền username/password
-                    //
-                    else if (action == "fill_credential") {
-                        string url = root.get_string_member("url");
-                        string origin = self.get_origin(url);
-                        string username = root.get_string_member("username");
-                        
-                        message("Fill credential request for: %s", username);
-                        
-                        // Lấy credential từ Keyring
-                        var cred = CredentialManager.get_default().get_credential_sync(origin);
-                        
-                        if (cred != null && cred.username == username) {
-                            var web_view = self.get_current_web_view();
-                            if (web_view != null) {
-                                // -------------------------------------------------
-                                // SECURITY: Use JSON encoding instead of manual escaping
-                                // -------------------------------------------------
-                                //
-                                // Manual escaping is incomplete and error-prone
-                                // JSON.to_string() handles all special characters properly
-                                //
-                                var builder = new Json.Builder();
-                                builder.begin_object();
-                                builder.set_member_name("u");
-                                builder.add_string_value(cred.username);
-                                builder.set_member_name("p");
-                                builder.add_string_value(cred.password);
-                                builder.end_object();
-                                
-                                var generator = new Json.Generator();
-                                generator.set_root(builder.get_root());
-                                string json_data = generator.to_data(null);
-                                
-                                // Generate one-time security token
-                                string token = "%lld_%d".printf(GLib.get_real_time(), GLib.Random.int_range(1000, 9999));
-                                
-                                // Set token first, then call fill with token verification
-                                string set_token_js = "window._setAutofillToken('%s');".printf(token);
-                                string fill_js = "(function() { var d = %s; window.fillCredentialsSecure(d.u, d.p, '%s'); })();".printf(json_data, token);
-                                
-                                // Execute both in sequence
-                                web_view.evaluate_javascript.begin(set_token_js + fill_js, -1, null, null, null, null);
-                                
-                                message("Credentials filled securely for %s", username);
-                            }
+                            var generator = new Json.Generator();
+                            generator.set_root(builder.get_root());
+                            string json_data = generator.to_data(null);
+                            
+                            // Generate one-time security token
+                            string token = "%lld_%d".printf(GLib.get_real_time(), GLib.Random.int_range(1000, 9999));
+                            
+                            // Set token first, then call fill with token verification
+                            string set_token_js = "window._setAutofillToken('%s');".printf(token);
+                            string fill_js = "(function() { var d = %s; window.fillCredentialsSecure(d.u, d.p, '%s'); })();".printf(json_data, token);
+                            
+                            // Execute both in sequence
+                            web_view.evaluate_javascript.begin(set_token_js + fill_js, -1, null, null, null, null);
+                            
+                            message("Credentials filled securely for %s", username);
                         }
                     }
                 }
@@ -894,6 +1090,59 @@ public class BrowserWindow : Adw.ApplicationWindow {
         //
         back_button.sensitive = web_view.can_go_back();
         forward_button.sensitive = web_view.can_go_forward();
+    }
+
+    // =========================================================================
+    // CẬP NHẬT GỢI Ý URL TỪ LỊCH SỬ
+    // =========================================================================
+    //
+    // Được gọi mỗi khi text trong url_entry thay đổi
+    // Tìm kiếm trong lịch sử và cập nhật ListStore
+    //
+    private void update_url_completions() {
+        // Xóa tất cả gợi ý cũ
+        url_completion_model.clear();
+        
+        // Lấy text hiện tại trong entry
+        string query = url_entry.text.strip();
+        
+        // Nếu query quá ngắn, không hiển thị gợi ý
+        // (HistoryManager.search() cũng kiểm tra điều này)
+        if (query.length < 2) {
+            return;
+        }
+        
+        // -----------------------------------------------------------------
+        // TÌM KIẾM TRONG LỊCH SỬ
+        // -----------------------------------------------------------------
+        //
+        // HistoryManager.search() trả về tối đa 10 kết quả
+        // đã sorted theo thời gian (mới nhất trước)
+        //
+        var results = HistoryManager.get_default().search(query);
+        
+        // -----------------------------------------------------------------
+        // THÊM KẾT QUẢ VÀO LISTSTORE
+        // -----------------------------------------------------------------
+        //
+        for (int i = 0; i < results.length; i++) {
+            var item = results[i];
+            
+            // Tạo text hiển thị: "Title - URL"
+            // VD: "Google - https://www.google.com"
+            string display_text = "%s - %s".printf(item.title, item.url);
+            
+            // Thêm vào model
+            // Cột 0: URL (để điền vào entry khi chọn)
+            // Cột 1: Display text (hiển thị trong dropdown)
+            Gtk.TreeIter iter;
+            url_completion_model.append(out iter);
+            url_completion_model.set(iter, 
+                0, item.url,
+                1, display_text,
+                -1  // Sentinel để kết thúc variadic args
+            );
+        }
     }
 
     // =========================================================================

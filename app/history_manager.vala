@@ -231,6 +231,61 @@ public class HistoryManager : GLib.Object {
     }
 
     // =========================================================================
+    // TÌM KIẾM LỊCH SỬ - Search History
+    // =========================================================================
+    //
+    // Tìm kiếm các mục lịch sử khớp với query
+    // Dùng cho autocomplete trong URL bar
+    //
+    // Tham số:
+    //   - query: Chuỗi tìm kiếm (có thể là một phần của URL hoặc title)
+    //
+    // Trả về:
+    //   - Mảng tối đa 10 kết quả phù hợp nhất (sorted by time, newest first)
+    //
+    public GenericArray<HistoryItem?> search(string query) {
+        var results = new GenericArray<HistoryItem?>();
+        
+        // -----------------------------------------------------------------
+        // VALIDATION
+        // -----------------------------------------------------------------
+        //
+        // Nếu query rỗng hoặc quá ngắn, không trả về kết quả
+        // Tránh trường hợp hiển thị quá nhiều gợi ý không liên quan
+        //
+        if (query.strip() == "" || query.length < 2) {
+            return results;
+        }
+        
+        // Chuyển query thành lowercase để so sánh không phân biệt hoa thường
+        // down(): Chuyển string thành lowercase
+        string query_lower = query.down();
+        
+        // -----------------------------------------------------------------
+        // TÌM KIẾM TRONG LỊCH SỬ
+        // -----------------------------------------------------------------
+        //
+        // Duyệt qua từng mục lịch sử
+        // Nếu URL hoặc title chứa query → Thêm vào kết quả
+        //
+        for (int i = 0; i < history.length && results.length < 10; i++) {
+            var item = history[i];
+            
+            // Chuyển URL và title thành lowercase để so sánh
+            string url_lower = item.url.down();
+            string title_lower = item.title.down();
+            
+            // Kiểm tra xem query có xuất hiện trong URL hoặc title không
+            // contains(): Kiểm tra string có chứa substring không
+            if (url_lower.contains(query_lower) || title_lower.contains(query_lower)) {
+                results.add(item);
+            }
+        }
+        
+        return results;
+    }
+
+    // =========================================================================
     // LƯU LỊCH SỬ VÀO FILE - Save to JSON
     // =========================================================================
     //
