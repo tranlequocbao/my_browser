@@ -62,9 +62,9 @@ public class BrowserApp : Adw.Application {
             application_id: "com.example.MyBrowser",
             
             // flags: Các cờ cấu hình ứng dụng
-            // DEFAULT_FLAGS: Cấu hình mặc định, đủ cho hầu hết ứng dụng
-            // Có thể dùng: HANDLES_OPEN để xử lý file từ command line
-            flags: ApplicationFlags.DEFAULT_FLAGS
+            // NON_UNIQUE: Cho phép nhiều instance, không yêu cầu D-Bus registration
+            // Điều này giúp tránh lỗi "Failed to register" trên một số hệ thống
+            flags: ApplicationFlags.NON_UNIQUE
         );
     }
 
@@ -131,14 +131,25 @@ public class BrowserApp : Adw.Application {
     //   - Ứng dụng được kích hoạt từ D-Bus
     //
     protected override void activate() {
+        message("main.vala: activate() called - creating window");
+        
         // Tạo cửa sổ trình duyệt mới
         // 'this' là tham chiếu đến BrowserApp hiện tại
         // Cửa sổ cần biết nó thuộc về Application nào
         var window = new BrowserWindow(this);
         
+        message("main.vala: BrowserWindow created");
+        message("main.vala: Window application is: %s", (window.application != null).to_string());
+        
         // present(): Hiển thị cửa sổ và đưa lên foreground
         // Khác với show() - present() còn đảm bảo cửa sổ được focus
+        message("main.vala: About to call present()...");
         window.present();
+        message("main.vala: present() returned!");
+        
+        message("main.vala: Window visible: %s", window.get_visible().to_string());
+        message("main.vala: Window is-active: %s", window.is_active.to_string());
+        message("main.vala: activate() finished");
     }
 
     // =========================================================================

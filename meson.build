@@ -68,12 +68,16 @@ project('my_browser', 'vala', 'c',
 # 5. libsecret-1: Libsecret - Quản lý mật khẩu
 #    → Cung cấp: API để lưu/lấy mật khẩu từ GNOME Keyring
 #
+# 6. gee-0.8: Libgee - Collection library
+#    → Cung cấp: HashSet, ArrayList, HashMap... (advanced collections)
+#
 deps = [
   dependency('gtk4'),
   dependency('libadwaita-1'),
   dependency('webkitgtk-6.0'),
   dependency('json-glib-1.0'),
   dependency('libsecret-1'),
+  dependency('gee-0.8'),
 ]
 
 # ------------------------------------------------------------------------------

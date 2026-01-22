@@ -60,9 +60,17 @@ using Json;    // Thư viện json-glib để đọc/ghi JSON
 //
 
 public struct HistoryItem {
-    public string url;        // Địa chỉ URL đầy đủ (VD: https://www.google.com/search?q=hello)
-    public string title;      // Tiêu đề trang web (VD: "hello - Google Search")
-    public string timestamp;  // Thời điểm truy cập (ISO 8601 format)
+    public string url;         // Địa chỉ URL đầy đủ (VD: https://www.google.com/search?q=hello)
+    public string title;       // Tiêu đề trang web (VD: "hello - Google Search")
+    public string timestamp;   // Thời điểm truy cập (ISO 8601 format)
+    public int visit_count;    // Số lần visit (Chrome-style frequency tracking)
+    public int64 last_visit_ts; // Unix timestamp của lần visit cuối (for ranking)
+}
+
+// Helper struct for frecency ranking
+private struct ScoredItem {
+    HistoryItem item;
+    double score;
 }
 
 // -----------------------------------------------------------------------------
@@ -177,28 +185,52 @@ public class HistoryManager : GLib.Object {
         if (url == "" || url.has_prefix("about:")) return;
 
         // -----------------------------------------------------------------
-        // TẠO HISTORY ITEM MỚI
+        // CHROME-STYLE: CHECK FOR EXISTING URL
         // -----------------------------------------------------------------
         //
-        // DateTime.now_local(): Lấy thời gian hiện tại theo timezone local
-        // format_iso8601(): Chuyển thành chuỗi ISO 8601
-        //   VD: "2026-01-20T22:00:00+07:00"
-        //
-        // ISO 8601 là chuẩn quốc tế cho định dạng ngày giờ:
-        //   - YYYY-MM-DD: Năm-Tháng-Ngày
-        //   - T: Separator giữa ngày và giờ
-        //   - HH:MM:SS: Giờ:Phút:Giây
-        //   - +07:00: Timezone offset (VD: Việt Nam = UTC+7)
+        // Thay vì luôn thêm entry mới, kiểm tra URL đã tồn tại chưa
+        // Nếu có → increment visit_count và update timestamp
+        // Nếu chưa → tạo mới với visit_count = 1
         //
         var now = new DateTime.now_local();
+        int64 now_ts = now.to_unix();
+        
+        // Tìm kiếm URL trong history
+        for (int i = 0; i < history.length; i++) {
+            var item = history[i];
+            
+            if (item.url == url) {
+                // URL đã tồn tại - update thông tin
+                item.title = title;  // Cập nhật title (có thể đã thay đổi)
+                item.timestamp = now.format_iso8601();
+                item.visit_count++;
+                item.last_visit_ts = now_ts;
+                
+                history[i] = item;  // Ghi lại struct đã update
+                
+                // Di chuyển lên đầu (most recent first)
+                if (i > 0) {
+                    history.remove_index(i);
+                    history.insert(0, item);
+                }
+                
+                save();
+                return;
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // TẠO HISTORY ITEM MỚI (URL chưa tồn tại)
+        // -----------------------------------------------------------------
         HistoryItem item = { 
-            url,                   // URL trang web
-            title,                 // Tiêu đề
-            now.format_iso8601()   // Thời điểm truy cập
+            url,                    // URL trang web
+            title,                  // Tiêu đề
+            now.format_iso8601(),   // Thời điểm truy cập
+            1,                      // visit_count = 1 (lần đầu)
+            now_ts                  // last_visit_ts
         };
         
         // Thêm vào đầu mảng (mới nhất ở trên cùng)
-        // insert(0, item): Chèn vào vị trí 0 (đầu mảng)
         history.insert(0, item);
         
         // Lưu vào file ngay lập tức
@@ -231,17 +263,17 @@ public class HistoryManager : GLib.Object {
     }
 
     // =========================================================================
-    // TÌM KIẾM LỊCH SỬ - Search History
+    // TÌM KIẾM LỊCH SỬ VỚI CHROME-STYLE RANKING - Search with Frecency
     // =========================================================================
     //
-    // Tìm kiếm các mục lịch sử khớp với query
-    // Dùng cho autocomplete trong URL bar
+    // Tìm kiếm và xếp hạng theo Frecency (Frequency + Recency)
+    // Công thức: score = visit_count × recency_multiplier
     //
     // Tham số:
-    //   - query: Chuỗi tìm kiếm (có thể là một phần của URL hoặc title)
+    //   - query: Chuỗi tìm kiếm
     //
     // Trả về:
-    //   - Mảng tối đa 10 kết quả phù hợp nhất (sorted by time, newest first)
+    //   - Mảng kết quả đã sắp xếp theo score (cao nhất trước)
     //
     public GenericArray<HistoryItem?> search(string query) {
         var results = new GenericArray<HistoryItem?>();
@@ -249,37 +281,68 @@ public class HistoryManager : GLib.Object {
         // -----------------------------------------------------------------
         // VALIDATION
         // -----------------------------------------------------------------
-        //
-        // Nếu query rỗng hoặc quá ngắn, không trả về kết quả
-        // Tránh trường hợp hiển thị quá nhiều gợi ý không liên quan
-        //
-        if (query.strip() == "" || query.length < 2) {
+        if (query.strip() == "" || query.length < 1) {
             return results;
         }
         
-        // Chuyển query thành lowercase để so sánh không phân biệt hoa thường
-        // down(): Chuyển string thành lowercase
         string query_lower = query.down();
         
         // -----------------------------------------------------------------
-        // TÌM KIẾM TRONG LỊCH SỬ
+        // TÌM KIẾM VÀ TÍNH SCORE
         // -----------------------------------------------------------------
-        //
-        // Duyệt qua từng mục lịch sử
-        // Nếu URL hoặc title chứa query → Thêm vào kết quả
-        //
-        for (int i = 0; i < history.length && results.length < 10; i++) {
+        ScoredItem[] scored_items = {};
+        int64 now = new DateTime.now_local().to_unix();
+        
+        for (int i = 0; i < history.length; i++) {
             var item = history[i];
             
-            // Chuyển URL và title thành lowercase để so sánh
             string url_lower = item.url.down();
             string title_lower = item.title.down();
             
-            // Kiểm tra xem query có xuất hiện trong URL hoặc title không
-            // contains(): Kiểm tra string có chứa substring không
             if (url_lower.contains(query_lower) || title_lower.contains(query_lower)) {
-                results.add(item);
+                // -----------------------------------------------------------------
+                // CHROME-STYLE FRECENCY SCORE
+                // -----------------------------------------------------------------
+                // Recency multiplier based on time elapsed
+                int64 elapsed = now - item.last_visit_ts;
+                int recency_multiplier;
+                
+                if (elapsed < 4 * 3600) {           // < 4 hours
+                    recency_multiplier = 100;
+                } else if (elapsed < 24 * 3600) {   // < 1 day
+                    recency_multiplier = 70;
+                } else if (elapsed < 7 * 24 * 3600) { // < 1 week
+                    recency_multiplier = 50;
+                } else if (elapsed < 30 * 24 * 3600) { // < 1 month
+                    recency_multiplier = 30;
+                } else {
+                    recency_multiplier = 10;
+                }
+                
+                double score = item.visit_count * recency_multiplier;
+                
+                ScoredItem scored = { item, score };
+                scored_items += scored;
             }
+        }
+        
+        // -----------------------------------------------------------------
+        // SORT BY SCORE (descending)
+        // -----------------------------------------------------------------
+        // Bubble sort (đủ tốt cho autocomplete)
+        for (int i = 0; i < scored_items.length - 1; i++) {
+            for (int j = 0; j < scored_items.length - i - 1; j++) {
+                if (scored_items[j].score < scored_items[j + 1].score) {
+                    var temp = scored_items[j];
+                    scored_items[j] = scored_items[j + 1];
+                    scored_items[j + 1] = temp;
+                }
+            }
+        }
+        
+        // Add to results (top items first)
+        for (int i = 0; i < scored_items.length; i++) {
+            results.add(scored_items[i].item);
         }
         
         return results;
@@ -331,6 +394,13 @@ public class HistoryManager : GLib.Object {
             // Thêm "timestamp": "..."
             builder.set_member_name("timestamp");
             builder.add_string_value(item.timestamp);
+            
+            //Ch Chrome-style fields
+            builder.set_member_name("visit_count");
+            builder.add_int_value(item.visit_count);
+            
+            builder.set_member_name("last_visit_ts");
+            builder.add_int_value(item.last_visit_ts);
             
             // Kết thúc object: }
             builder.end_object();
@@ -395,10 +465,13 @@ public class HistoryManager : GLib.Object {
                     var obj = array.get_object_element(i);
                     
                     // Tạo HistoryItem từ JSON object
+                    // Backward compatibility: old files không có visit_count/last_visit_ts
                     HistoryItem item = {
                         obj.get_string_member("url"),
                         obj.get_string_member("title"),
-                        obj.get_string_member("timestamp")
+                        obj.get_string_member("timestamp"),
+                        obj.has_member("visit_count") ? (int)obj.get_int_member("visit_count") : 1,
+                        obj.has_member("last_visit_ts") ? obj.get_int_member("last_visit_ts") : 0
                     };
                     
                     // Thêm vào mảng history

@@ -92,10 +92,8 @@ public class BrowserWindow : Adw.ApplicationWindow {
     private Button reload_button;    // Nút reload trang
     
     // URL Autocomplete
-    // ListStore: Lưu trữ gợi ý URL từ lịch sử
-    // Cột 0: URL (string) - giá trị thực tế
-    // Cột 1: Display text (string) - hiển thị cho user (title + url)
-    private Gtk.ListStore url_completion_model;
+    private Popover completion_popover;
+    private ListBox completion_list;
     
     // =========================================================================
     // NETWORK SESSION - Quản lý kết nối mạng và dữ liệu persistent
@@ -219,8 +217,20 @@ public class BrowserWindow : Adw.ApplicationWindow {
         // Gọi constructor cha với các properties
         Object(
             application: app,        // Thuộc về application nào
-            title: "My Browser"      // Tiêu đề cửa sổ
+            title: "My Browser",     // Tiêu đề cửa sổ
+            default_width: 1200,
+            default_height: 800,
+            resizable: true,
+            visible: true            // QUAN TRỌNG: Đảm bảo window hiển thị
         );
+        
+        message("BrowserWindow constructor started");
+        message("Application ID: %s", app.application_id ?? "null");
+        
+        // Force window properties for Wayland/Hyprland
+        this.set_startup_id("my-browser");
+        this.set_decorated(true);
+        this.set_deletable(true);
 
         // -----------------------------------------------------------------
         // TẠO LAYOUT CHÍNH (ToolbarView)
@@ -288,55 +298,35 @@ public class BrowserWindow : Adw.ApplicationWindow {
         url_entry.hexpand = true;                      // Mở rộng theo chiều ngang
         
         // -----------------------------------------------------------------
-        // THIẾT LẬP AUTOCOMPLETE CHO URL ENTRY
+        // THIẾT LẬP AUTOCOMPLETE CHO URL ENTRY (Custom Popover)
         // -----------------------------------------------------------------
         //
-        // EntryCompletion: Widget hiển thị gợi ý dropdown khi user gõ
-        // ListStore: Model lưu trữ các gợi ý
+        // Gtk.EntryCompletion bị deprecated → Dùng Gtk.Popover + Gtk.ListBox
         //
-        // Cấu trúc ListStore:
-        //   - Cột 0 (string): URL thực tế (https://google.com)
-        //   - Cột 1 (string): Text hiển thị (Google - https://google.com)
-        //
-        url_completion_model = new Gtk.ListStore(2, typeof(string), typeof(string));
+        completion_popover = new Popover();
+        completion_popover.set_parent(url_entry);
+        completion_popover.autohide = false; // Đừng tự đóng khi mất focus của popover
+        completion_popover.position = PositionType.BOTTOM;
+        completion_popover.has_arrow = false;
         
-        // Tạo EntryCompletion và gắn model
-        var completion = new Gtk.EntryCompletion();
-        completion.set_model(url_completion_model);
+        completion_list = new ListBox();
+        completion_list.add_css_class("navigation-sidebar"); // Style đẹp hơn
         
-        // Cấu hình widget hiển thị
-        // text_column = 1: Hiển thị cột 1 (display text) trong dropdown
-        completion.set_text_column(1);
+        var completion_scroll = new ScrolledWindow();
+        completion_scroll.set_policy(PolicyType.NEVER, PolicyType.AUTOMATIC);
+        completion_scroll.set_child(completion_list);
+        completion_scroll.set_size_request(400, 300);
         
-        // Cấu hình hành vi
-        completion.set_inline_completion(false);     // Không tự động điền inline
-        completion.set_popup_completion(true);       // Hiển thị popup dropdown
-        completion.set_popup_single_match(false);    // Không popup nếu chỉ có 1 match
-        completion.set_minimum_key_length(2);        // Chỉ hiển thị khi gõ >= 2 ký tự
+        completion_popover.set_child(completion_scroll);
         
-        // Gắn completion vào url_entry
-        url_entry.set_completion(completion);
-        
-        // -----------------------------------------------------------------
-        // XỬ LÝ KHI USER CHỌN GỢI Ý
-        // -----------------------------------------------------------------
-        //
-        // Signal match-selected: Khi user click hoặc nhấn Enter trên gợi ý
-        //
-        completion.match_selected.connect((model, iter) => {
-            // Lấy URL từ cột 0 của model
-            GLib.Value url_value;
-            model.get_value(iter, 0, out url_value);
-            string selected_url = url_value.get_string();
-            
-            // Điền URL vào entry
-            url_entry.text = selected_url;
-            
-            // Trigger activate signal để load URL
-            url_entry.activate();
-            
-            // Return true để ngăn hành vi mặc định
-            return true;
+        // Xử lý khi user chọn một mục trong list
+        completion_list.row_activated.connect((row) => {
+            var action_row = row as Adw.ActionRow;
+            if (action_row != null) {
+                url_entry.text = action_row.subtitle; // subtitle lưu URL thật
+                url_entry.activate();
+                completion_popover.popdown();
+            }
         });
         
         // -----------------------------------------------------------------
@@ -348,6 +338,77 @@ public class BrowserWindow : Adw.ApplicationWindow {
         url_entry.changed.connect(() => {
             update_url_completions();
         });
+        
+        // -----------------------------------------------------------------
+        // XỬ LÝ KEYBOARD NAVIGATION CHO AUTOCOMPLETE
+        // -----------------------------------------------------------------
+        //
+        // Key event controller để bắt phím mũi tên và Escape
+        //
+        var key_controller = new Gtk.EventControllerKey();
+        url_entry.add_controller(key_controller);
+        
+        key_controller.key_pressed.connect((keyval, keycode, state) => {
+            // Escape: Đóng suggestions
+            if (keyval == Gdk.Key.Escape) {
+                completion_popover.popdown();
+                return true;
+            }
+            
+            // Nếu popover không hiện, không xử lý arrow keys
+            if (!completion_popover.visible) {
+                return false;
+            }
+            
+            // Arrow Down: Chọn suggestion tiếp theo
+            if (keyval == Gdk.Key.Down) {
+                var selected = completion_list.get_selected_row();
+                if (selected == null) {
+                    // Chọn item đầu tiên
+                    var first = completion_list.get_row_at_index(0);
+                    if (first != null) {
+                        completion_list.select_row(first);
+                    }
+                } else {
+                    // Chọn item tiếp theo
+                    int index = selected.get_index();
+                    var next = completion_list.get_row_at_index(index + 1);
+                    if (next != null) {
+                        completion_list.select_row(next);
+                    }
+                }
+                return true;
+            }
+            
+            // Arrow Up: Chọn suggestion trước đó
+            if (keyval == Gdk.Key.Up) {
+                var selected = completion_list.get_selected_row();
+                if (selected != null) {
+                    int index = selected.get_index();
+                    if (index > 0) {
+                        var prev = completion_list.get_row_at_index(index - 1);
+                        if (prev != null) {
+                            completion_list.select_row(prev);
+                        }
+                    }
+                }
+                return true;
+            }
+            
+            // Enter: Activate selected suggestion
+            if (keyval == Gdk.Key.Return || keyval == Gdk.Key.KP_Enter) {
+                var selected = completion_list.get_selected_row();
+                if (selected != null) {
+                    completion_list.row_activated(selected);
+                    return true;
+                }
+            }
+            
+            return false;
+        });
+        
+        // Ẩn popover khi click ra ngoài (handled by autohide của Popover)
+        // Không dùng focus.leave vì nó gây lỗi khi suggestions đang hiện
         
         // Đặt url_entry làm title widget của header bar
         // → URL entry nằm ở giữa, mở rộng chiếm không gian còn lại
@@ -454,10 +515,37 @@ public class BrowserWindow : Adw.ApplicationWindow {
         });
 
         // -----------------------------------------------------------------
-        // THÊM TAB MẶC ĐỊNH
+        // FIX: HYPRLAND WORKSPACE SWITCH FREEZE
         // -----------------------------------------------------------------
         //
-        add_tab("https://www.google.com");
+        // Vấn đề: Khi chuyển workspace trong Hyprland, window bị freeze
+        // Nguyên nhân: Window không nhận signal visibility change đúng cách
+        // Giải pháp: Lắng nghe is-active signal và force refresh WebViews
+        //
+        // notify["is-active"]: Khi window được activate/deactivate
+        // is-active: true khi window có focus, false khi không
+        //
+        this.notify["is-active"].connect(on_window_activation_changed);
+
+        // -----------------------------------------------------------------
+        // THÊM TAB MẶC ĐỊNH (DEFERRED)
+        // -----------------------------------------------------------------
+        //
+        // Vấn đề: Tạo WebView trong constructor block window display
+        // Giải pháp: Dùng GLib.Idle.add() để tạo tab sau khi window ready
+        // 
+        // GLib.Idle.add(): Thêm callback vào event loop
+        // → Callback được gọi khi GTK event loop idle (sau khi window hiển thị)
+        //
+        message("Scheduling first tab creation...");
+        GLib.Idle.add(() => {
+            message("Idle callback: adding first tab now...");
+            add_tab("https://www.google.com");
+            message("First tab added");
+            return false;  // false = chỉ chạy một lần, không lặp lại
+        });
+        
+        message("Constructor finished - window ready to be presented");
     }
 
     // =========================================================================
@@ -511,8 +599,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
             critical("[Security] TLS Error for %s: %u", failing_uri, errors);
             
             // Hiển thị warning dialog
-            var dialog = new Adw.MessageDialog(
-                this,
+            var dialog = new Adw.AlertDialog(
                 "Security Warning",
                 "The security certificate for %s is not trusted. This site may not be secure.".printf(failing_uri)
             );
@@ -530,7 +617,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
                 }
             });
             
-            dialog.present();
+            dialog.present(this);
             
             // Return true để stop loading (cho phép user quyết định)
             return true;
@@ -703,7 +790,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
         // Cho phép JavaScript gửi tin nhắn qua:
         //   webkit.messageHandlers.password_manager.postMessage(...)
         //
-        content_manager.register_script_message_handler("password_manager", null);
+        content_manager.register_script_message_handler("password_manager", "");
         
         // -----------------------------------------------------------------
         // KẾT NỐI CALLBACKS CHO MESSAGE HANDLERS
@@ -837,10 +924,8 @@ public class BrowserWindow : Adw.ApplicationWindow {
                     // HIỂN THỊ DIALOG "LƯU MẬT KHẨU?"
                     // -------------------------------------------------
                     //
-                    // Adw.MessageDialog: Dialog với message và các buttons
-                    //
-                    var dlg = new Adw.MessageDialog(
-                        self,                                    // Parent window
+                    // Adw.AlertDialog: Modern replacement for MessageDialog
+                    var dlg = new Adw.AlertDialog(
                         "Save Password?",                         // Heading
                         "Do you want to save the password for %s?".printf(username)  // Body
                     );
@@ -857,7 +942,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
                         }
                     });
                     
-                    dlg.present();
+                    dlg.present(self);
                 }
                 
                 // ---------------------------------------------------------
@@ -957,7 +1042,7 @@ public class BrowserWindow : Adw.ApplicationWindow {
                             string json_data = generator.to_data(null);
                             
                             // Generate one-time security token
-                            string token = "%lld_%d".printf(GLib.get_real_time(), GLib.Random.int_range(1000, 9999));
+                            string token = ("%" + int64.FORMAT + "_%d").printf(GLib.get_real_time(), GLib.Random.int_range(1000, 9999));
                             
                             // Set token first, then call fill with token verification
                             string set_token_js = "window._setAutofillToken('%s');".printf(token);
@@ -1101,48 +1186,183 @@ public class BrowserWindow : Adw.ApplicationWindow {
     //
     private void update_url_completions() {
         // Xóa tất cả gợi ý cũ
-        url_completion_model.clear();
+        Widget? child = completion_list.get_first_child();
+        while (child != null) {
+            Widget? next = child.get_next_sibling();
+            completion_list.remove(child);
+            child = next;
+        }
         
         // Lấy text hiện tại trong entry
-        string query = url_entry.text.strip();
+        string query = url_entry.text.strip().down();  // Lowercase for matching
         
-        // Nếu query quá ngắn, không hiển thị gợi ý
-        // (HistoryManager.search() cũng kiểm tra điều này)
-        if (query.length < 2) {
+        // Nếu query quá ngắn hoặc là full URL, không hiển thị gợi ý
+        if (query.length < 1 || query.has_prefix("http://") || query.has_prefix("https://")) {
+            completion_popover.popdown();
             return;
         }
         
         // -----------------------------------------------------------------
-        // TÌM KIẾM TRONG LỊCH SỬ
+        // POPULAR DOMAINS (Chrome-style suggestions)
         // -----------------------------------------------------------------
-        //
-        // HistoryManager.search() trả về tối đa 10 kết quả
-        // đã sorted theo thời gian (mới nhất trước)
-        //
-        var results = HistoryManager.get_default().search(query);
+        string[] popular_domains = {
+            "google.com",
+            "facebook.com",
+            "youtube.com",
+            "twitter.com",
+            "github.com",
+            "reddit.com",
+            "amazon.com",
+            "wikipedia.org",
+            "stackoverflow.com",
+            "linkedin.com"
+        };
+        
+        var seen_urls = new Gee.HashSet<string>();
+        HistoryItem[] suggestions = {};
         
         // -----------------------------------------------------------------
-        // THÊM KẾT QUẢ VÀO LISTSTORE
+        // 1. POPULAR DOMAIN MATCHING (thêm trước)
+        // -----------------------------------------------------------------
+        foreach (string domain in popular_domains) {
+            if (domain.has_prefix(query) || domain.contains(query)) {
+                string url = "https://" + domain;
+                if (!seen_urls.contains(url)) {
+                    // Get simple title from domain (e.g., "google" from "google.com")
+                    string title = domain.split(".")[0];
+                    title = title.substring(0, 1).up() + title.substring(1);  // Capitalize
+                    
+                    HistoryItem item = { url, title, "" };  // Empty timestamp for suggestions
+                    suggestions += item;
+                    seen_urls.add(url);
+                    
+                    if (suggestions.length >= 5) break;  // Max 5 popular suggestions
+                }
+            }
+        }
+        
+        // -----------------------------------------------------------------
+        // 2. HISTORY SEARCH (thêm sau)
+        // -----------------------------------------------------------------
+        var results = HistoryManager.get_default().search(query);
+        
+        foreach (var item in results) {
+            if (!seen_urls.contains(item.url)) {
+                seen_urls.add(item.url);
+                suggestions += item;
+                
+                // Giới hạn tổng cộng 10 suggestions
+                if (suggestions.length >= 10) {
+                    break;
+                }
+            }
+        }
+        
+        // Nếu không có gợi ý nào, ẩn popover
+        if (suggestions.length == 0) {
+            completion_popover.popdown();
+            return;
+        }
+        
+        // -----------------------------------------------------------------
+        // THÊM KẾT QUẢ VÀO LISTBOX
+        // -----------------------------------------------------------------
+        for (int i = 0; i < suggestions.length; i++) {
+            var item = suggestions[i];
+            
+            var row = new Adw.ActionRow();
+            
+            // Title with visit count (Chrome-style)
+            string title_text = item.title != "" ? item.title : item.url;
+            if (item.visit_count > 1) {
+                // Show visit count for frequently visited pages
+                row.title = GLib.Markup.escape_text(title_text) + 
+                           " <span size='small' foreground='#888'>(%d×)</span>".printf(item.visit_count);
+            } else {
+                row.title = GLib.Markup.escape_text(title_text);
+            }
+            
+            row.subtitle = GLib.Markup.escape_text(item.url);
+            row.activatable = true;
+            
+            completion_list.append(row);
+        }
+        
+        completion_popover.popup();
+    }
+
+    // =========================================================================
+    // FIX: REFRESH WEBVIEWS KHI WINDOW ĐƯỢC ACTIVATE
+    // =========================================================================
+    //
+    // Được gọi khi window được activate/deactivate (chuyển workspace, minimize, etc.)
+    // Fix cho bug: WebView bị freeze khi chuyển workspace trong Hyprland
+    //
+    // Giải thích kỹ thuật:
+    //   - Wayland compositors như Hyprland không gửi visibility signals giống GNOME
+    //   - WebView không tự động refresh render khi window được activate lại
+    //   - NUCLEAR OPTION: Thực sự thay đổi size để trigger resize event
+    //     → Giống như minimize/maximize làm
+    //
+    private void on_window_activation_changed() {
+        // Chỉ xử lý khi window được activate (is-active = true)
+        if (!this.is_active) {
+            return;
+        }
+        
+        message("Window activated - forcing REAL WebView resize");
+        
+        // -----------------------------------------------------------------
+        // NUCLEAR OPTION: FORCE REAL SIZE CHANGE
         // -----------------------------------------------------------------
         //
-        for (int i = 0; i < results.length; i++) {
-            var item = results[i];
-            
-            // Tạo text hiển thị: "Title - URL"
-            // VD: "Google - https://www.google.com"
-            string display_text = "%s - %s".printf(item.title, item.url);
-            
-            // Thêm vào model
-            // Cột 0: URL (để điền vào entry khi chọn)
-            // Cột 1: Display text (hiển thị trong dropdown)
-            Gtk.TreeIter iter;
-            url_completion_model.append(out iter);
-            url_completion_model.set(iter, 
-                0, item.url,
-                1, display_text,
-                -1  // Sentinel để kết thúc variadic args
-            );
+        // Tại sao visibility toggle không đủ?
+        //   - WebView internal state không reset
+        //   - Render pipeline không được trigger
+        //
+        // Tại sao minimize work?
+        //   - Nó thực sự thay đổi size allocation
+        //   - Trigger size-allocate signal thật sự
+        //
+        // Giải pháp: Fake minimize bằng cách thay đổi size thật sự
+        //
+        int n_pages = tab_view.get_n_pages();
+        
+        // Step 1: Lưu current sizes và set temporary size
+        for (int i = 0; i < n_pages; i++) {
+            var page = tab_view.get_nth_page(i);
+            if (page != null) {
+                var web_view = page.child as WebView;
+                if (web_view != null) {
+                    // Force set size nhỏ
+                    // Điều này trigger size-allocate với size mới
+                    web_view.set_size_request(1, 1);
+                }
+            }
         }
+        
+        // Step 2: Delay nhỏ để GTK process resize
+        Timeout.add(10, () => {
+            // Restore normal size
+            for (int i = 0; i < n_pages; i++) {
+                var page = tab_view.get_nth_page(i);
+                if (page != null) {
+                    var web_view = page.child as WebView;
+                    if (web_view != null) {
+                        // Reset về -1 = no size constraint
+                        // WebView sẽ expand về full size
+                        web_view.set_size_request(-1, -1);
+                        
+                        // Sau khi reset size, force draw
+                        web_view.queue_resize();
+                        web_view.queue_draw();
+                    }
+                }
+            }
+            
+            message("WebView resize cycle complete");
+            return false;
+        });
     }
 
     // =========================================================================
