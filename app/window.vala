@@ -679,6 +679,91 @@ public class BrowserWindow : Adw.ApplicationWindow {
         message("File access restrictions enabled");
         
         // -----------------------------------------------------------------
+        // MEDIA & HARDWARE ACCELERATION SETTINGS
+        // -----------------------------------------------------------------
+        //
+        // These settings are critical for smooth video playback
+        // Without them, videos may fail to load or stutter
+        //
+        // HARDWARE ACCELERATION:
+        //   - Uses GPU for rendering → smoother playback
+        //   - Reduces CPU usage
+        //
+        // WEBGL:
+        //   - Many video players use WebGL for rendering
+        //   - Required for modern video streaming sites
+        //
+        // MEDIA CAPABILITIES:
+        //   - Enables HTML5 video/audio playback
+        //   - Supports various codecs and formats
+        //
+        // MEDIA STREAM:
+        //   - Required for live streaming and WebRTC
+        //   - Enables getUserMedia() for video conferencing sites
+        //
+        
+        // Enable hardware acceleration for smooth video rendering
+        settings.hardware_acceleration_policy = WebKit.HardwareAccelerationPolicy.ALWAYS;
+        message("Hardware acceleration: ALWAYS");
+        
+        // Enable WebGL (required by many video players)
+        settings.enable_webgl = true;
+        message("WebGL enabled");
+        
+        // Enable media playback
+        settings.enable_media = true;
+        message("Media playback enabled");
+        
+        // Enable media capabilities API (for adaptive streaming)
+        settings.enable_media_capabilities = true;
+        message("Media capabilities enabled");
+        
+        // Enable media stream (for live video/WebRTC)
+        settings.enable_media_stream = true;
+        message("Media stream enabled");
+        
+        // Enable Web Audio API (for advanced audio processing)
+        settings.enable_webaudio = true;
+        message("Web Audio enabled");
+        
+        // Enable JavaScript (required for modern video players)
+        settings.enable_javascript = true;
+        
+        // Enable JavaScript markup (for video player controls)
+        settings.enable_javascript_markup = true;
+        message("JavaScript features enabled for video players");
+        
+        // -----------------------------------------------------------------
+        // PERFORMANCE OPTIMIZATION SETTINGS
+        // -----------------------------------------------------------------
+        //
+        // These settings improve video decode/render performance
+        //
+        
+        // Enable compositor (improves rendering performance)
+        settings.enable_write_console_messages_to_stdout = false;  // Reduce overhead
+        
+        // Enable DNS prefetching for faster resource loading
+        settings.enable_dns_prefetching = true;
+        message("DNS prefetching enabled");
+        
+        // Enable page caching
+        settings.enable_page_cache = true;
+        message("Page cache enabled");
+        
+        // Enable smooth scrolling (uses GPU compositing)
+        settings.enable_smooth_scrolling = true;
+        message("Smooth scrolling enabled");
+        
+        // Enable site-specific quirks for better compatibility
+        settings.enable_site_specific_quirks = true;
+        message("Site-specific quirks enabled");
+        
+        
+        
+        
+        
+        // -----------------------------------------------------------------
         // INJECT CONSOLE LOGGING SCRIPT
         // -----------------------------------------------------------------
         //

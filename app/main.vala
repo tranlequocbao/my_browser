@@ -138,15 +138,13 @@ public class BrowserApp : Adw.Application {
         // Cửa sổ cần biết nó thuộc về Application nào
         var window = new BrowserWindow(this);
         
-        message("main.vala: BrowserWindow created");
-        message("main.vala: Window application is: %s", (window.application != null).to_string());
+        message("main.vala: BrowserWindow created, calling present()");
         
         // present(): Hiển thị cửa sổ và đưa lên foreground
         // Khác với show() - present() còn đảm bảo cửa sổ được focus
-        message("main.vala: About to call present()...");
         window.present();
-        message("main.vala: present() returned!");
         
+        message("main.vala: window.present() returned");
         message("main.vala: Window visible: %s", window.get_visible().to_string());
         message("main.vala: Window is-active: %s", window.is_active.to_string());
         message("main.vala: activate() finished");
