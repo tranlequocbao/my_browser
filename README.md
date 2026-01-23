@@ -14,8 +14,9 @@ Chào mừng bạn đến với dự án **My Browser**! Đây là một trình 
 6. [Hệ Thống Password Manager](#-6-hệ-thống-password-manager)
 7. [Hệ Thống Session & Cookie](#-7-hệ-thống-session--cookie)
 8. [Hệ Thống Lịch Sử Duyệt Web](#-8-hệ-thống-lịch-sử-duyệt-web)
-9. [Biên Dịch và Chạy Ứng Dụng](#-9-biên-dịch-và-chạy-ứng-dụng)
-10. [Tài Liệu Tham Khảo](#-10-tài-liệu-tham-khảo)
+9. [**🎬 Tối Ưu Video & GStreamer**](#-9-tối-ưu-video--gstreamer) ⭐ **MỚI**
+10. [Biên Dịch và Chạy Ứng Dụng](#-10-biên-dịch-và-chạy-ứng-dụng)
+11. [Tài Liệu Tham Khảo](#-11-tài-liệu-tham-khảo)
 
 ---
 
